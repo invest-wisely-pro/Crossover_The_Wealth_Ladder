@@ -241,12 +241,12 @@ const GD = {
       "color": "#cfe8cf",
       "cards": [
         ["Istruzione Figli", "Accantona 50.000 € in un fondo dedicato entro il turno 60. Se ci riesci, ottieni 2 Punti Saggezza permanenti."],
-        ["Casa al Mare", "Raggiungi un capitale libero (non vincolato) di 250.000 € per questo progetto specifico. Se ci riesci, guadagni 1 casella Rich Life gratuita a ogni giro."],
+        ["Casa al Mare", "Raggiungi un capitale libero (non vincolato) di 550.000 € per questo progetto specifico. Se ci riesci, guadagni 1 casella Rich Life gratuita a ogni giro."],
         ["Pensione Anticipata", "Raggiungi il tuo «Numero di Libertà» (25x le spese annue) entro il turno 120. Vittoria anticipata se ci riesci prima degli altri."],
         ["Libertà Mentale", "Porta la tua barra Energia Vitale al massimo minimizzando il lavoro. Vinci se, a fine partita, hai il punteggio EV più alto tra chi ha comunque raggiunto il Livello 3."],
         ["Libertà Geografica", "Accumula un reddito passivo pari ad almeno il doppio dei tuoi Bisogni Essenziali entro il turno 90. Se ci riesci, puoi ignorare 1 Tassa Patrimoniale a scelta."],
         ["Eredità Filantropica", "Raggiungi il Livello 5 e destina almeno 50.000 € in un fondo Trust separato dal tuo patrimonio investibile. Se ci riesci, ottieni 3 Punti Saggezza permanenti a fine partita."],
-        ["Impero Immobiliare", "Possiedi contemporaneamente almeno 3 quote di REITs entro il turno 90. Se ci riesci, incassi +2% di reddito passivo a ogni giro fino a fine partita."],
+        ["Impero Immobiliare", "Possiedi contemporaneamente almeno 6 quote di REITs entro il turno 100. Se ci riesci, incassi +2% di reddito passivo a ogni giro fino a fine partita."],
         ["Fondo per la Comunità", "Dona almeno 20.000 € complessivi in spese Rich Life «altruistiche» durante la partita. Se ci riesci, guadagni 2 Punti Saggezza permanenti e non subisci mai penali di burnout."]
       ]
     },
@@ -462,7 +462,7 @@ const GD = {
     "n": 26,
     "t": "draw",
     "title": "Obiettivo di Vita",
-    "sub": "Se non ne hai, pescalo",
+    "sub": "Se non ne hai lo peschi, altrimenti tiri il dado del destino",
     "deck": "goal"
   }, {
     "n": 27,
@@ -692,9 +692,12 @@ function makePlayer(name, varna, isBot, botStyle) {
     avatarName: varna,
     pendingSkip: 0,
     dadFund: 0,
+    dadFundLaps: 0, // giri consecutivi in cui il fondo figli è rimasto attivo (fedeltà → rendimento crescente)
     trustFund: 0,
     donated: 0,
     goalDone: false,
+    goal2: null,
+    goal2Done: false,
     _creditFreeze: 0,
     _costoImmuneUsed: false,
     _lastLevel: 1,
@@ -754,6 +757,36 @@ function incomeOf(p) {
 function essOf(p) {
   const lv = levelOf(p).n;
   return Math.round(ESSENTIALS[lv] * vmod(p).essentials);
+}
+
+// Costo della Rich Life: cospicuo e scalato sul Livello raggiunto. Non più mezza spesa essenziale
+// (irrisoria), ma una fetta reale del reddito di un anno (giro): benessere e status costano di più
+// man mano che sali. È pensato per essere un vero sacrificio di capitale investibile — l'equilibrio
+// fra "curare l'Energia Vitale" e "far crescere il patrimonio" deve pesare davvero.
+function richCost(p) {
+  const lv = levelOf(p).n;
+  // ~12% del reddito per giro del Livello, con un minimo legato a 3x le spese essenziali del turno.
+  const base = Math.round(INCOME[lv] * 0.12);
+  const floor = essOf(p) * 3;
+  return Math.max(base, floor);
+}
+
+// Costo della Consulenza Finanziaria: annullare in anticipo QUALSIASI carta negativa è una protezione
+// potente, quindi deve costare parecchio e crescere col Livello. È un'assicurazione premium, non un
+// gadget da due soldi: ~20% del reddito per giro (min 4x le spese essenziali del turno).
+function consulenzaCost(p) {
+  const lv = levelOf(p).n;
+  const base = Math.round(INCOME[lv] * 0.20);
+  const floor = essOf(p) * 4;
+  return Math.max(base, floor);
+}
+
+// Versamento MINIMO nel Trust di protezione patrimoniale: deve essere un impegno serio e proporzionale
+// al Livello, non una formalità. Sotto questa soglia il versamento non è accettato. Cresce col Livello
+// perché protegge patrimoni via via più grandi dalla Tassa Patrimoniale.
+function trustMinDeposit(p) {
+  const lv = levelOf(p).n;
+  return Math.max(Math.round(INCOME[lv] * 0.5), essOf(p) * 8);
 }
 
 /* ====================== SCREENS ====================== */
@@ -945,12 +978,14 @@ const GOAL_LOGIC = {
   },
   "Casa al Mare": {
     kind: "neutro",
-    target: 250000,
-    check: p => p.cash >= 250000,
+    target: 400000,
+    // Alzata da 250k a 400k: la ricompensa (Rich Life gratuita a ogni giro, per sempre) è forte,
+    // quindi il traguardo deve richiedere un vero accantonamento di liquidità (costo-opportunità).
+    check: p => p.cash >= 550000,
     reward: p => {
       p.goalPerk_richFree = true;
     },
-    hint: p => `Contante libero ${fmt(p.cash)} / 250.000 €`,
+    hint: p => `Contante libero ${fmt(p.cash)} / 550.000 €`,
     rewardText: "1 Rich Life gratuita a ogni giro (mantieni EV senza spendere)",
   },
   "Pensione Anticipata": {
@@ -972,28 +1007,30 @@ const GOAL_LOGIC = {
   },
   "Libertà Mentale": {
     kind: "neutro",
-    // completato a fine partita: EV più alto tra chi ha raggiunto Liv.3. Qui: premio se EV==10 e Liv>=3
-    check: p => p.ev >= 10 && levelOf(p).n >= 3,
+    // Prima bastava EV al massimo + Liv.3 → completato quasi sempre (100%). Ora serve mantenere
+    // un'alta Energia Vitale MENTRE si è già saliti al Livello 4: equilibrio tra benessere e crescita.
+    check: p => p.ev >= 10 && levelOf(p).n >= 5,
     reward: p => {
       p.goalPerk_evShield = true;
     },
-    hint: p => `EV ${p.ev}/10 · Livello ${levelOf(p).n} (serve ≥3)`,
+    hint: p => `EV ${p.ev}/10 (serve 10) · Livello ${levelOf(p).n} (serve ≥5)`,
     rewardText: "Immunità al burnout per il resto della partita",
   },
   "Libertà Geografica": {
     kind: "accel",
-    // reddito passivo (4% asset /giro) >= 2x essenziali per giro
+    // Reddito passivo per turno ≥ 0,8× i Bisogni Essenziali del turno, entro il turno 110.
+    // Tarato sul comportamento reale: a 1,5× nessun bot ci arrivava (0%); a 0,8× è un traguardo
+    // impegnativo ma possibile per chi costruisce davvero un portafoglio che rende.
     check: p => {
-      const passivePerLap = assetsTotal(p) * 0.04;
-      return passivePerLap >= essOf(p) * 2 * 5 && G.turn <= 90;
+      return passiveIncomePerTurn(p) >= essOf(p) * 0.8 && G.turn <= 110;
     },
     reward: p => {
       p.goalPerk_skipTax = true;
     },
     hint: p => {
-      const pass = Math.round(assetsTotal(p) * 0.04);
-      const need = Math.round(essOf(p) * 2 * 5);
-      return `Reddito passivo ${fmt(pass)}/giro / obiettivo ${fmt(need)}`;
+      const pass = Math.round(passiveIncomePerTurn(p));
+      const need = Math.round(essOf(p) * 0.8);
+      return `Reddito passivo/turno ${fmt(pass)} / obiettivo ${fmt(need)} (Livello ${levelOf(p).n})`;
     },
     rewardText: "Puoi ignorare 1 Tassa Patrimoniale",
   },
@@ -1009,14 +1046,15 @@ const GOAL_LOGIC = {
   },
   "Impero Immobiliare": {
     kind: "accel",
-    // almeno 3 "quote" di REITs: consideriamo 1 quota ogni 15.000 € investiti in REITs
-    check: p => Math.floor((p.assets["REITs"] || 0) / 15000) >= 3 && G.turn <= 90,
+    // 5 quote di REITs (1 quota = 15.000 €) entro il turno 100: un vero impegno di portafoglio,
+    // non più completabile quasi automaticamente con la sola spinta della casella Obiettivo.
+    check: p => Math.floor((p.assets["REITs"] || 0) / 15000) >= 6 && G.turn <= 100,
     reward: p => {
       p.goalPerk_passiveBoost = true;
     },
     hint: p => {
       const q = Math.floor((p.assets["REITs"] || 0) / 15000);
-      return `Quote REITs ${q} / 3 (1 quota = 15.000 €)`;
+      return `Quote REITs ${q} / 6 (1 quota = 15.000 €)`;
     },
     rewardText: "+2% di reddito passivo a ogni giro fino a fine partita",
   },
@@ -1033,8 +1071,168 @@ const GOAL_LOGIC = {
   },
 };
 
+// La casella Obiettivo dà una "spinta" concreta e proporzionata verso il proprio traguardo.
+// Il valore della spinta è tarato sul Livello (≈ metà dei Bisogni Essenziali di un giro) così
+// resta significativo a ogni fase di gioco senza mai regalare la vittoria.
+function applyGoalBoost(p, mult) {
+  mult = mult || 1;
+  const unit = Math.max(1000, Math.round(essOf(p) * 2.5 * mult)); // scala col Livello e con l'esito del dado
+  const title = p.goal ? p.goal.title : "";
+  if (p.goalDone) {
+    // obiettivo già raggiunto: piccolo premio simbolico coerente (Saggezza o contante)
+    if (Math.random() < 0.5) { p.wisdom += 1; return { msg: "Obiettivo già completato: <b>+1 Punto Saggezza</b>." }; }
+    const bonus = unit; p.cash += bonus; return { msg: `Obiettivo già completato: <b>+${fmt(bonus)}</b> di dividendo della tua realizzazione.` };
+  }
+  switch (title) {
+    case "Istruzione Figli": {
+      const add = Math.min(unit * 2, 50000); p.dadFund = (p.dadFund || 0) + add;
+      return { msg: `Un contributo entra nel <b>fondo figli</b>: +${fmt(add)} (ora ${fmt(p.dadFund)}/50.000).` };
+    }
+    case "Eredità Filantropica": {
+      const add = unit * 2; p.trustFund = (p.trustFund || 0) + add;
+      return { msg: `Versamento agevolato nel <b>Trust</b>: +${fmt(add)} (ora ${fmt(p.trustFund)}/50.000).` };
+    }
+    case "Fondo per la Comunità": {
+      const add = Math.min(unit, 20000); p.donated = (p.donated || 0) + add;
+      return { msg: `Una donazione viene registrata: +${fmt(add)} donati (ora ${fmt(p.donated)}/20.000).` };
+    }
+    case "Impero Immobiliare": {
+      const add = 15000 * Math.round(mult); p.assets["REITs"] = (p.assets["REITs"] || 0) + add;
+      const q = Math.floor((p.assets["REITs"] || 0) / 15000);
+      return { msg: `Ottieni <b>${Math.round(mult)} quota/e REITs</b> in omaggio (ora ${q}/6 quote).` };
+    }
+    case "Casa al Mare": {
+      const add = unit * 2; p.cash += add;
+      return { msg: `Metti da parte <b>+${fmt(add)}</b> di capitale libero per la casa (ora ${fmt(p.cash)}/550.000).` };
+    }
+    case "Libertà Geografica":
+    case "Pensione Anticipata": {
+      // avvicinano il reddito passivo: boost di asset difensivi
+      const add = unit * 2; p.assets["Large Stocks"] = (p.assets["Large Stocks"] || 0) + add;
+      return { msg: `Un'occasione rafforza il tuo <b>reddito passivo futuro</b>: +${fmt(add)} in Large Stocks.` };
+    }
+    case "Libertà Mentale": {
+      const up = Math.round(3 * mult); p.ev = Math.min(10, p.ev + up);
+      return { msg: `Recuperi <b>+${up} Energia Vitale</b> (ora ${p.ev}/10).` };
+    }
+    default: {
+      const add = unit; p.cash += add;
+      return { msg: `Ricevi <b>+${fmt(add)}</b> per avvicinarti al tuo obiettivo.` };
+    }
+  }
+}
+
+// Regressione dell'obiettivo (esito 1-2 del dado sulla casella Obiettivo). Solo su obiettivo NON completo:
+// chi ha già raggiunto il traguardo non può perderlo. Toglie progresso senza mai scendere sotto zero.
+function applyGoalRegression(p, mult) {
+  mult = mult || 1;
+  const unit = Math.max(1000, Math.round(essOf(p) * 2.5 * mult));
+  const title = p.goal ? p.goal.title : "";
+  switch (title) {
+    case "Istruzione Figli": {
+      const cut = Math.min(p.dadFund || 0, unit * 2); p.dadFund = (p.dadFund || 0) - cut;
+      return { msg: `Un imprevisto intacca il <b>fondo figli</b>: −${fmt(cut)} (ora ${fmt(p.dadFund)}/50.000).` };
+    }
+    case "Eredità Filantropica": {
+      const cut = Math.min(p.trustFund || 0, unit * 2); p.trustFund = (p.trustFund || 0) - cut;
+      return { msg: `Costi legali sul <b>Trust</b>: −${fmt(cut)} (ora ${fmt(p.trustFund)}/50.000).` };
+    }
+    case "Fondo per la Comunità": {
+      const cut = Math.min(p.donated || 0, unit); p.donated = (p.donated || 0) - cut;
+      return { msg: `Una donazione viene contestata e ritirata: −${fmt(cut)} donati (ora ${fmt(p.donated)}/20.000).` };
+    }
+    case "Impero Immobiliare": {
+      const cut = Math.min(p.assets["REITs"] || 0, 15000 * Math.round(mult)); p.assets["REITs"] = (p.assets["REITs"] || 0) - cut;
+      const q = Math.floor((p.assets["REITs"] || 0) / 15000);
+      return { msg: `Il mercato immobiliare corregge: perdi <b>${Math.round(mult)} quota/e REITs</b> (ora ${q}/6).` };
+    }
+    case "Casa al Mare": {
+      const cut = Math.min(p.cash, unit * 2); p.cash -= cut;
+      return { msg: `Una spesa imprevista erode il capitale per la casa: −${fmt(cut)} (ora ${fmt(p.cash)}/550.000).` };
+    }
+    case "Libertà Geografica":
+    case "Pensione Anticipata": {
+      const cut = Math.min(p.assets["Large Stocks"] || 0, unit * 2); p.assets["Large Stocks"] = (p.assets["Large Stocks"] || 0) - cut;
+      return { msg: `Un calo di mercato frena il tuo <b>reddito passivo</b>: −${fmt(cut)} in Large Stocks.` };
+    }
+    case "Libertà Mentale": {
+      const down = Math.round(2 * mult); p.ev = Math.max(0, p.ev - down);
+      return { msg: `Stress imprevisto: <b>−${down} Energia Vitale</b> (ora ${p.ev}/10).` };
+    }
+    default: {
+      const cut = Math.min(p.cash, unit); p.cash -= cut;
+      return { msg: `Un contrattempo ti allontana dall'obiettivo: −${fmt(cut)}.` };
+    }
+  }
+}
+
+// Esito del tiro sulla casella Obiettivo di Vita. Ritorna l'oggetto con messaggio e tipo, gestendo
+// avanzamento/regressione e l'eventuale secondo obiettivo (solo su 6 e se non ne hai già due).
+function resolveGoalRoll(p, roll) {
+  // 1-2 = regressione (solo se obiettivo incompleto); 3-4 piccolo avanzamento; 5 grande; 6 grande + chance 2° obiettivo
+  if (roll <= 2 && !p.goalDone) {
+    const strength = roll === 1 ? 2 : 1;
+    const r = applyGoalRegression(p, strength);
+    return { kind: "down", roll, msg: r.msg };
+  }
+  if (roll <= 2 && p.goalDone) {
+    // obiettivo già completo: niente regressione, solo un piccolo premio di consolazione
+    const b = applyGoalBoost(p, 1);
+    return { kind: "up", roll, msg: b.msg };
+  }
+  let mult = 1;
+  if (roll >= 3 && roll <= 4) mult = 1;
+  else if (roll === 5) mult = 2;
+  else if (roll === 6) mult = 2;
+  const b = applyGoalBoost(p, mult);
+  let extra = "";
+  if (roll === 6) {
+    const second = maybeGrantSecondGoal(p);
+    if (second) extra = ` <br><b>🎯 Doppio traguardo!</b> Ricevi anche un secondo Obiettivo: «${second}».`;
+  }
+  return { kind: "up", roll, msg: b.msg + extra };
+}
+
+// Secondo obiettivo opzionale (misti): con un 6 sulla casella, se non ne hai già due, peschi un
+// obiettivo diverso da quello attuale. Entrambi restano attivi e completabili in modo indipendente.
+function maybeGrantSecondGoal(p) {
+  if (p.goal2) return null; // già due obiettivi
+  const pool = GD.decks.goal.cards.map(c => c[0]).filter(t => t !== (p.goal && p.goal.title));
+  if (!pool.length) return null;
+  const pick = pool[Math.floor(Math.random() * pool.length)];
+  const card = GD.decks.goal.cards.find(c => c[0] === pick);
+  p.goal2 = { title: pick, body: card ? card[1] : "" };
+  p.goal2Done = false;
+  return pick;
+}
+
 // controlla l'obiettivo di un giocatore ad ogni giro; applica ricompensa una volta
 function checkGoal(p) {
+  checkGoalSlot(p, "goal", "goalDone");
+  if (p.goal2) checkGoalSlot(p, "goal2", "goal2Done");
+}
+function checkGoalSlot(p, goalKey, doneKey) {
+  if (!p[goalKey] || p[doneKey]) return;
+  const lg = GOAL_LOGIC[p[goalKey].title];
+  if (!lg) return;
+  if (lg.check(p)) {
+    p[doneKey] = true;
+    lg.reward(p);
+    pushLog(`🎯 ${p.name} completa l'Obiettivo «${p[goalKey].title}»: ${lg.rewardText}!`);
+    if (lg.isVictory && p.goalWinsEarly) {
+      G.phase = "win";
+      G.winner = p;
+      G.byGoal = true;
+    }
+    if (!p.isBot) {
+      modal(`<h3>🎯 Obiettivo raggiunto!</h3>
+        <div class="card-box" style="margin:0 0 10px;"><b>${p[goalKey].title}</b>
+        <div class="info-line" style="margin-top:4px;">Ricompensa: <b>${lg.rewardText}</b></div></div>
+        <button class="btn block" onclick="closeModal(this)">Ottimo!</button>`);
+    }
+  }
+}
+function checkGoal_OLD(p) {
   if (!p.goal || p.goalDone) return;
   const lg = GOAL_LOGIC[p.goal.title];
   if (!lg) return;
@@ -1069,14 +1267,15 @@ function goalEvShield(p) {
 }
 
 // progresso stringa per la UI
-function goalProgress(p) {
-  if (!p.goal) return null;
-  const lg = GOAL_LOGIC[p.goal.title];
+function goalProgress(p, goalKey, doneKey) {
+  goalKey = goalKey || "goal"; doneKey = doneKey || "goalDone";
+  if (!p[goalKey]) return null;
+  const lg = GOAL_LOGIC[p[goalKey].title];
   if (!lg) return null;
   return {
-    title: p.goal.title,
-    body: p.goal.body,
-    done: !!p.goalDone,
+    title: p[goalKey].title,
+    body: p[goalKey].body,
+    done: !!p[doneKey],
     kind: lg.kind,
     hint: lg.hint ? lg.hint(p) : "",
     reward: lg.rewardText
@@ -1592,6 +1791,20 @@ function passVia(p, laps) {
   const summary = [];
   for (let i = 0; i < laps; i++) {
     let inc = incomeOf(p);
+    // BURNOUT PROGRESSIVO: se l'Energia Vitale è bassa, lavori peggio e guadagni meno.
+    // EV 4-5 → −20% reddito; EV 2-3 → −40%; EV 0-1 → −60%. È il costo reale del non prendersi cura di sé.
+    const evShielded = goalEvShield(p);
+    if (!evShielded) {
+      let malus = 0;
+      if (p.ev <= 1) malus = 0.60;
+      else if (p.ev <= 3) malus = 0.40;
+      else if (p.ev <= 5) malus = 0.20;
+      if (malus > 0) {
+        const lost = Math.round(inc * malus);
+        inc -= lost;
+        summary.push(`😩 Burnout (EV ${p.ev}/10): reddito ridotto di ${fmt(lost)} (−${Math.round(malus*100)}%).`);
+      }
+    }
     if (p._halfIncome > 0) {
       inc = Math.round(inc * 0.5);
       tickEffect(p, '_halfIncome', 'Market Timing (reddito dimezzato)');
@@ -1607,6 +1820,18 @@ function passVia(p, laps) {
     p.cash += inc;
     pushLog(`${p.name} passa da VIA! e incassa ${fmt(inc)}.`);
     summary.push(`💰 Incassi ${fmt(inc)} di reddito.`);
+    // LA VITA LOGORA: ogni anno (giro) consuma Energia Vitale. Ai Livelli alti lo stress è maggiore.
+    // Va recuperata attivamente con la Rich Life, altrimenti scivoli verso il burnout.
+    if (!evShielded) {
+      const drain = levelOf(p).n >= 4 ? 3 : 2;
+      p.ev = Math.max(0, p.ev - drain);
+      summary.push(`🔋 La vita logora: −${drain} Energia Vitale (ora ${p.ev}/10).`);
+      if (p.ev === 0) {
+        p.pendingSkip = (p.pendingSkip || 0) + 1;
+        summary.push(`💥 Sei a terra: burnout totale, salterai un turno.`);
+        pushLog(`${p.name}: burnout totale (EV 0) — salta un turno.`);
+      }
+    }
     applyReturns(p);
     // interessi sul Prestito Veneziano (Leva Finanziaria): tasso base 5%, +penalità da Bond
     // Vigilantes, -20% per il tratto de Il Leader. Prima d'ora i prestiti non costavano nulla.
@@ -1623,7 +1848,15 @@ function passVia(p, laps) {
     // Tratto Il Realizzatore: +20% su ogni risparmio automatico (fondo figli, trust)
     const savBoost = (p.varna === "Il Realizzatore") ? 1.2 : 1;
     if (p.dadFund > 0) {
-      p.dadFund *= (1 + 0.05 * savBoost);
+      // Fondo figli: rendimento crescente con la fedeltà. Base 6%, +0,5% per ogni giro di costanza
+      // fino a un massimo del 10%: premia la pazienza (interesse composto) e dà a questa casella un
+      // ruolo unico — un rifugio che, tenuto nel tempo, rende quanto le azioni ma senza il loro rischio.
+      p.dadFundLaps = (p.dadFundLaps || 0) + 1;
+      const loyalty = Math.min(0.04, 0.005 * p.dadFundLaps);
+      const rate = (0.06 + loyalty) * savBoost;
+      p.dadFund *= (1 + rate);
+    } else {
+      p.dadFundLaps = 0;
     }
     if (p.trustFund > 0) {
       p.trustFund *= (1 + 0.03 * savBoost);
@@ -1818,6 +2051,32 @@ function resolveTile(p, done) {
             body: c.body
           };
           pushLog(`${p.name} riceve l'Obiettivo: ${c.title}.`);
+          if (!p.isBot) {
+            modal(`<h3>🎯 Nuovo Obiettivo di Vita</h3>
+              <div class="card-box" style="margin:0 0 10px;"><b>${c.title}</b>
+              <div class="info-line" style="margin-top:4px;">${c.body}</div></div>
+              <button class="btn block" onclick="closeModal(this)">Continua ▶</button>`, {dismissable:false});
+            finish(); return;
+          }
+        } else {
+          // Casella Obiettivo: tiri il dado del destino. 1-2 = regressione (solo se incompleto),
+          // 3-4 = avanzamento, 5 = grande avanzamento, 6 = grande avanzamento + possibile 2° obiettivo.
+          const roll = 1 + Math.floor(Math.random() * 6);
+          const res = resolveGoalRoll(p, roll);
+          const face = ["", "⚀", "⚁", "⚂", "⚃", "⚄", "⚅"][roll];
+          const verdict = res.kind === "down" ? "📉 Regressione" : "📈 Avanzamento";
+          pushLog(`${p.name} tira il dado del destino sull'Obiettivo (${roll}): ${stripTags(res.msg)}`);
+          checkGoal(p);
+          if (!p.isBot) {
+            const color = res.kind === "down" ? "var(--rose)" : "var(--green)";
+            modal(`<h3>🎯 Casella Obiettivo — tiro del destino</h3>
+              <div style="text-align:center; font-size:2.6rem; margin:4px 0;">${face}</div>
+              <div style="text-align:center; font-weight:700; color:${color}; margin-bottom:8px;">${verdict} (hai tirato ${roll})</div>
+              <div class="card-box" style="margin:0 0 10px;"><b>${p.goal.title}</b>
+              <div class="info-line" style="margin-top:6px;">${res.msg}</div></div>
+              <button class="btn block" onclick="closeModal(this)">${res.kind === "down" ? "Peccato ▶" : "Ottimo ▶"}</button>`, {dismissable:false});
+            finish(); return;
+          }
         }
         finish();
         return;
@@ -1902,33 +2161,61 @@ function resolveTile(p, done) {
         return;
       }
       if (p.isBot) {
-        const cost = Math.round(essOf(p) * 0.5);
-        if (p.cash > cost * 3 && Math.random() < 0.5) {
+        const cost = richCost(p);
+        // Il bot cura la propria Energia Vitale: se è bassa recupera (evita il burnout che gli
+        // taglia il reddito), se è alta e vuole risparmiare può rinunciare. Decisione sensata.
+        const wantsRecovery = p.ev <= 5;
+        if (p.cash > cost * 2 && (wantsRecovery || Math.random() < 0.4)) {
           p.cash -= cost;
-          p.ev = Math.min(10, p.ev + 1);
-          pushLog(`${p.name} si concede un po' di Rich Life (${fmt(cost)}, +1 EV).`);
+          p.ev = Math.min(10, p.ev + 3);
+          pushLog(`${p.name} si concede Rich Life (${fmt(cost)}): +3 EV (ora ${p.ev}/10).`);
         } else {
           p.ev = Math.max(0, p.ev - 1);
-          pushLog(`${p.name} rinuncia alla Rich Life per risparmiare (-1 EV).`);
+          pushLog(`${p.name} rinuncia alla Rich Life (EV ${p.ev}/10).`);
+          if (p.ev === 0) { p.pendingSkip = (p.pendingSkip || 0) + 1; pushLog(`${p.name}: burnout! Salterà un turno.`); }
         }
         finish();
       } else askRich(p, finish);
       return;
     case "special":
       if (p.isBot) {
-        if (p.pos === 13 && p.cash > 3000 && Math.random() < 0.5) {
-          const dep = Math.round(p.cash * 0.15);
+        if (p.pos === 13 && p.cash > 3000 && Math.random() < (p.botStyle === "Prudente" ? 0.7 : p.botStyle === "Aggressivo" ? 0.25 : 0.45)) {
+          // I prudenti apprezzano il rifugio sicuro (versano di più); gli aggressivi preferiscono il rischio.
+          const frac = p.botStyle === "Prudente" ? 0.25 : 0.15;
+          const dep = Math.round(p.cash * frac);
           p.cash -= dep;
           p.dadFund = (p.dadFund || 0) + dep;
-          pushLog(`${p.name} versa ${fmt(dep)} nel fondo figli.`);
+          pushLog(`${p.name} versa ${fmt(dep)} nel fondo figli (rifugio sicuro).`);
         } else if (p.pos === 22) {
           p._arb = 3;
           pushLog(`${p.name}: dimezza i costi fissi per 3 turni.`);
+        } else if (p.pos === 19 && p.loans > 0 && p.cash > p.loans * 0.5) {
+          // Fix equità: come un umano che gestisce i debiti, il bot salda (in tutto o in parte) il
+          // Prestito Veneziano quando ha liquidità, evitando l'accumulo di interessi fino alla Rovina.
+          const pay = Math.min(p.loans, Math.round(p.cash * 0.6));
+          p.cash -= pay;
+          p.loans -= pay;
+          pushLog(`${p.name} salda ${fmt(pay)} del Prestito Veneziano (debito residuo ${fmt(p.loans)}).`);
         } else if (p.pos === 19 && p._creditFreeze <= 0 && p.botStyle === "Aggressivo" && p.loans < netWorth(p) * 0.3 && p.cash < 5000) {
           const loan = 10000;
           p.loans += loan;
           p.cash += loan;
           pushLog(`${p.name} accende un Prestito Veneziano di ${fmt(loan)}.`);
+        } else if (p.pos === 30 && p.botStyle !== "Aggressivo" && p.cash > consulenzaCost(p) * 3 && assetsTotal(p) > netWorth(p) * 0.5 && Math.random() < 0.4) {
+          // Consulenza Finanziaria: i profili prudenti/bilanciati si assicurano quando hanno molto
+          // capitale investito (esposto), pagando il premio proporzionale al Livello.
+          const c = consulenzaCost(p);
+          p.cash -= c;
+          p._shieldStupidity = true; p._shieldBigCrash = true; p._shieldCalifornia = true;
+          p.mungerHold = "Consulenza Finanziaria";
+          pushLog(`${p.name} paga ${fmt(c)} di Consulenza: si assicura dalla prossima carta negativa.`);
+        } else if (p.pos === 31 && levelOf(p).n >= 5 && p.cash > trustMinDeposit(p) * 2 && Math.random() < 0.5) {
+          // Trust: dal Livello 5 protegge il patrimonio dalla Tassa Patrimoniale. Versamento proporzionale.
+          const dep = Math.max(trustMinDeposit(p), Math.round(p.cash * 0.2));
+          p.cash -= dep;
+          p.trustFund = (p.trustFund || 0) + dep;
+          if (typeof checkGoal === "function") checkGoal(p);
+          pushLog(`${p.name} versa ${fmt(dep)} nel Trust (protezione patrimoniale).`);
         } else {
           pushLog(`${p.name}: casella ${TILES[p.pos].title}, nessuna azione.`);
         }
@@ -2110,6 +2397,17 @@ function endTurn() {
 function maybeBotTurn() {
   const p = cur();
   if (p.isBot && G.phase === "play") {
+    // Gestione debiti del bot (fix equità): prima di muoversi, se ha un Prestito Veneziano attivo
+    // e liquidità sufficiente, ne rimborsa una parte. Così i bot non accumulano interessi fino alla
+    // Rovina solo perché non atterrano sulla casella Leva, esattamente come farebbe un umano prudente.
+    if (p.loans > 0 && p.cash > p.loans * 0.75) {
+      const pay = Math.min(p.loans, Math.round(p.cash * 0.5));
+      if (pay > 0) {
+        p.cash -= pay;
+        p.loans -= pay;
+        pushLog(`${p.name} rimborsa ${fmt(pay)} del Prestito Veneziano (residuo ${fmt(p.loans)}).`);
+      }
+    }
     // mostra "sta pensando" e poi tira, con ritmo regolabile
     showBotThinking(p);
     G._lastActivityTs = Date.now();
@@ -2168,10 +2466,14 @@ function applyEndGameBonuses() {
   G._endBonusApplied = true;
   G.players.forEach(p => {
     if ((p.dadFund || 0) > 0) {
-      const bonus = Math.round(p.dadFund * 0.10);
+      // Bonus Eredità scalato sulla costanza: dal 10% (fondo recente) fino al 20% (fondo tenuto a lungo).
+      const laps = p.dadFundLaps || 0;
+      const rate = 0.10 + Math.min(0.10, laps * 0.01);
+      const bonus = Math.round(p.dadFund * rate);
+      const wis = laps >= 8 ? 2 : 1;
       p.cash += bonus;
-      p.wisdom += 1;
-      pushLog(`🎓 ${p.name}: Bonus Eredità dal fondo figli — +${fmt(bonus)} e +1 Saggezza.`);
+      p.wisdom += wis;
+      pushLog(`🎓 ${p.name}: Bonus Eredità dal fondo figli — +${fmt(bonus)} (${Math.round(rate*100)}%) e +${wis} Saggezza.`);
     }
   });
 }
@@ -2578,18 +2880,18 @@ function checkExtraBudget(p, amount, label) {
 }
 
 function askRich(p, done) {
-  const cost = Math.round(essOf(p) * 0.5);
+  const cost = richCost(p);
   const richFree = goalRichFree(p);
   const isGoalCommunity = p.goal && p.goal.title === "Fondo per la Comunità";
   const soglia = threshold001(p);
   const bg = modal(`
     <h3>Rich Life</h3>
-    <p class="info-line">Spesa facoltativa per lusso/hobby. Ti mantiene felice (evita burnout) ma riduce il contante.${richFree?' <b>Il tuo obiettivo ti offre 1 Rich Life gratuita!</b>':''}</p>
+    <p class="info-line">La vita logora: ogni anno consumi Energia Vitale (ora <b>${p.ev}/10</b>). La Rich Life la recupera (+3 EV), ma costa. Se l'EV resta basso vai in <b>burnout</b>: il reddito cala fino al −60% e a 0 salti un turno. Spendere o risparmiare è un vero dilemma.${richFree?' <b>Il tuo obiettivo ti offre 1 Rich Life gratuita!</b>':''}</p>
     ${!richFree && cost>soglia?`<p class="card-prompt">⚠️ Questa spesa supera lo 0,01% del tuo patrimonio netto (soglia ${fmt(soglia)}): se procedi, tirerai il dado Saggezza.</p>`:''}
     <div class="asset-buy-grid">
-      ${richFree?`<button class="btn" onclick="doRichFree(${G.cur},this)">Goditi la Rich Life GRATIS (+1 EV)</button>`:
-        `<button class="btn" onclick="doRichM(${G.cur},${cost},this)">Spendi ${fmt(cost)} per te (+1 EV)</button>`}
-      ${isGoalCommunity?`<button class="btn gold" onclick="doDonate(${G.cur},${cost*2},this)">Dona ${fmt(cost*2)} alla comunità (+1 EV, avanza obiettivo)</button>`:''}
+      ${richFree?`<button class="btn" onclick="doRichFree(${G.cur},this)">Goditi la Rich Life GRATIS (+3 EV)</button>`:
+        `<button class="btn" onclick="doRichM(${G.cur},${cost},this)">Spendi ${fmt(cost)} per te (+3 EV)</button>`}
+      ${isGoalCommunity?`<button class="btn gold" onclick="doDonate(${G.cur},${cost*2},this)">Dona ${fmt(cost*2)} alla comunità (+3 EV, avanza obiettivo)</button>`:''}
       <button class="btn secondary" onclick="skipRichM(${G.cur},this)">Salta</button>
     </div>
     `, {
@@ -2601,17 +2903,17 @@ function askRich(p, done) {
 function doRichM(idx, cost, btn) {
   const p = G.players[idx];
   p.cash -= cost;
-  p.ev = Math.min(10, p.ev + 1);
+  p.ev = Math.min(10, p.ev + 3);
   const note = checkExtraBudget(p, cost, "Rich Life");
-  pushLog(`${p.name} si concede Rich Life (${fmt(cost)}). ${note}`);
+  pushLog(`${p.name} si concede Rich Life (${fmt(cost)}): +3 Energia Vitale (ora ${p.ev}/10). ${note}`);
   solvency(p);
   finishRich(btn);
 }
 
 function doRichFree(idx, btn) {
   const p = G.players[idx];
-  p.ev = Math.min(10, p.ev + 1);
-  pushLog(`${p.name} si gode la Rich Life gratuita (obiettivo).`);
+  p.ev = Math.min(10, p.ev + 3);
+  pushLog(`${p.name} si gode la Rich Life gratuita (obiettivo): +3 Energia Vitale (ora ${p.ev}/10).`);
   finishRich(btn);
 }
 
@@ -2619,9 +2921,9 @@ function doDonate(idx, amt, btn) {
   const p = G.players[idx];
   p.cash -= amt;
   p.donated = (p.donated || 0) + amt;
-  p.ev = Math.min(10, p.ev + 1);
+  p.ev = Math.min(10, p.ev + 3);
   const note = checkExtraBudget(p, amt, "Donazione");
-  pushLog(`${p.name} dona ${fmt(amt)} alla comunità (totale donato ${fmt(p.donated)}). ${note}`);
+  pushLog(`${p.name} dona ${fmt(amt)} alla comunità (totale donato ${fmt(p.donated)}): +3 EV. ${note}`);
   solvency(p);
   checkGoal(p);
   finishRich(btn);
@@ -2634,9 +2936,9 @@ function skipRichM(idx, btn) {
   } else {
     p.ev = Math.max(0, p.ev - 1);
     if (p.ev === 0) {
-      p.pendingSkip = 1;
-      pushLog(`${p.name}: burnout! Salta un turno.`);
-    } else pushLog(`${p.name} salta la Rich Life (-1 EV).`);
+      p.pendingSkip = (p.pendingSkip || 0) + 1;
+      pushLog(`${p.name}: burnout! Salta un turno (EV a 0).`);
+    } else pushLog(`${p.name} rinuncia alla Rich Life: resta stanco (EV ${p.ev}/10, verso il burnout).`);
   }
   finishRich(btn);
 }
@@ -2657,15 +2959,18 @@ function finishRich(btn) {
 function askTrust(p, done) {
   const isGoalTrust = p.goal && p.goal.title === "Eredità Filantropica";
   const lv = levelOf(p).n;
+  const minDep = trustMinDeposit(p);
+  const q1 = minDep, q2 = minDep * 2;
   const bg = modal(`
     <h3>🏛️ Trust & Eredità</h3>
     <p class="info-line">Versa capitale in un fondo Trust separato. Dal Livello 5 il Trust è <b>escluso dalla base imponibile</b> della Tassa Patrimoniale e cresce nel tempo (+3%/giro, +20% con Il Realizzatore).${lv<5?' <br>Sei al Livello '+lv+': la protezione fiscale scatta dal Livello 5, ma puoi comunque iniziare ad accantonare.':''}${isGoalTrust?' <b>Contribuisce anche al tuo obiettivo «Eredità Filantropica»!</b>':''}</p>
+    <p class="info-line">Proteggere un patrimonio è un impegno serio: il versamento minimo è <b>${fmt(minDep)}</b> (cresce col Livello).</p>
     <label>Importo da versare (contante disponibile: ${fmt(p.cash)})</label>
-    <input type="text" id="trustAmt" inputmode="numeric" placeholder="es. 10000">
+    <input type="text" id="trustAmt" inputmode="numeric" placeholder="min ${fmt(minDep)}">
     <div class="quickamt">
-      <button onclick="document.getElementById('trustAmt').value=5000">5.000</button>
-      <button onclick="document.getElementById('trustAmt').value=20000">20.000</button>
-      <button onclick="document.getElementById('trustAmt').value=${Math.max(0,Math.round(p.cash*0.3))}">30% contante</button>
+      <button onclick="document.getElementById('trustAmt').value=${q1}">${fmt(q1)}</button>
+      <button onclick="document.getElementById('trustAmt').value=${q2}">${fmt(q2)}</button>
+      <button onclick="document.getElementById('trustAmt').value=${Math.max(minDep,Math.round(p.cash*0.3))}">30% contante</button>
     </div>
     <p class="info-line" style="margin-top:6px;">Trust attuale: <b style="color:var(--green)">${fmt(p.trustFund||0)}</b></p>
     <div class="mrow" style="margin-top:8px;">
@@ -2682,8 +2987,13 @@ function doTrust(idx, btn) {
   const p = G.players[idx];
   const bg = btn.closest(".modal-bg");
   const amt = Math.max(0, parseFloat((bg.querySelector("#trustAmt").value || "0").replace(/[^0-9.]/g, "")) || 0);
+  const minDep = trustMinDeposit(p);
   if (amt <= 0) {
     toast("Inserisci un importo.");
+    return;
+  }
+  if (amt < minDep) {
+    toast(`Il Trust richiede almeno ${fmt(minDep)} (impegno proporzionale al Livello).`);
     return;
   }
   if (amt > p.cash) {
@@ -2721,12 +3031,12 @@ function botTrustDeposit(p) {
 /* ---- special tiles (umano) ---- */
 function askSpecial(p, t, done) {
   let body = "";
-  if (p.pos === 13) body = `<b>Bank of Dad.</b> Versa parte del reddito nel fondo dei figli: cresce al 5% a giro e a fine partita ti dà un <b>Bonus Eredità</b> (+ Punti Saggezza). Riduce la liquidità immediata.`;
+  if (p.pos === 13) body = `<b>Bank of Dad — il tuo rifugio sicuro.</b> Versa contante nel fondo dei figli: cresce dal 6% fino al 10% a giro premiando la costanza, è <b>immune ai crolli di mercato</b> e puoi ritirarlo in ogni momento se ti serve liquidità. A fine partita dà un <b>Bonus Eredità</b> (+ Punti Saggezza). Rende meno degli asset più rischiosi, ma non perde mai valore.`;
   else if (p.pos === 19) body = p._creditFreeze > 0 ?
     `<b>Leva Finanziaria.</b> Il credito è congelato (Stretta Creditizia): ancora ${p._creditFreeze} turno/i prima di poter accendere nuovi prestiti.` :
     `<b>Leva Finanziaria.</b> Prestito Veneziano al 5% d'interesse per giro (20% in meno per Il Leader), oppure Bottomry Loan: finanzia solo l'acquisto di Small Stocks, interesse fisso 22-30% deciso subito, rimborso a dado dopo 12 turni (rischio Naufragio).`;
   else if (p.pos === 22) body = `<b>Arbitraggio Geografico.</b> Dimezza i costi fissi per 3 turni.`;
-  else if (p.pos === 30) body = `<b>Consulenza Finanziaria.</b> Paghi un costo per proteggerti dalla prossima carta negativa.`;
+  else if (p.pos === 30) body = `<b>Consulenza Finanziaria.</b> Un'assicurazione premium: paghi una cifra proporzionale al tuo Livello per annullare la prossima carta negativa, qualunque essa sia. Protezione forte, prezzo che fa male.`;
   let extra = "";
   if (p.pos === 13) {
     extra = `<label>Importo da versare nel fondo figli (dal contante: ${fmt(p.cash)})</label>
@@ -2752,7 +3062,7 @@ function askSpecial(p, t, done) {
       </div>
       <p class="info-line" style="margin-top:6px;">Debito attuale: <b style="color:var(--rose)">${p.loans>0?'−'+fmt(p.loans):'nessuno'}</b></p>`;
   } else if (p.pos === 30) {
-    extra = `<p class="info-line">Costo: ${fmt(Math.round(essOf(p)*0.5))}.</p>`;
+    extra = `<p class="info-line">Costo dell'assicurazione: <b>${fmt(consulenzaCost(p))}</b> (cresce col Livello). Annulla la prossima carta negativa, qualunque essa sia.</p>`;
   }
   const bg = modal(`
     <h3>${t.title}</h3>
@@ -2760,6 +3070,7 @@ function askSpecial(p, t, done) {
     ${extra}
     <div class="mrow">
       ${p.pos===13?`<button class="btn" onclick="doDadM(${G.cur},this)">Versa nel fondo</button>`:''}
+      ${p.pos===13 && (p.dadFund||0)>0?`<button class="btn secondary" onclick="doDadWithdraw(${G.cur},this)">Ritira tutto (${fmt(p.dadFund)})</button>`:''}
       ${(p.pos===19&&p._creditFreeze<=0)?`<button class="btn" onclick="doLoanM(${G.cur},this)">Accendi prestito</button>`:''}
       ${p.pos===22?`<button class="btn" onclick="doArbM(${G.cur},this)">Attiva</button>`:''}
       ${p.pos===30?`<button class="btn" onclick="doConsM(${G.cur},this)">Paga & proteggi</button>`:''}
@@ -2793,6 +3104,17 @@ function doDadM(idx, btn) {
   p.dadFund = (p.dadFund || 0) + amt;
   pushLog(`${p.name} versa ${fmt(amt)} nel fondo figli (totale ${fmt(p.dadFund)}).`);
   toast(`Versati ${fmt(amt)} nel fondo figli.`);
+  finishSpecial(btn);
+}
+function doDadWithdraw(idx, btn) {
+  const p = G.players[idx];
+  const amt = Math.round(p.dadFund || 0);
+  if (amt <= 0) { toast("Il fondo figli è vuoto."); return; }
+  p.cash += amt;
+  p.dadFund = 0;
+  p.dadFundLaps = 0; // ritirando azzeri la fedeltà: se riversi, il rendimento riparte dal 6%
+  pushLog(`${p.name} ritira ${fmt(amt)} dal fondo figli (torna liquido).`);
+  toast(`Ritirati ${fmt(amt)} dal fondo figli.`);
   finishSpecial(btn);
 }
 
@@ -2841,7 +3163,8 @@ function doArbM(idx, btn) {
 
 function doConsM(idx, btn) {
   const p = G.players[idx];
-  const c = Math.round(essOf(p) * 0.5);
+  const c = consulenzaCost(p);
+  if (c > p.cash) { toast("Contante insufficiente per la Consulenza."); return; }
   p.cash -= c;
   p._shieldStupidity = true;
   p._shieldBigCrash = true;
@@ -2962,19 +3285,26 @@ function confirmSell(assetName, btn) {
 
 function openInfo() {
   const p = cur();
-  const gp = goalProgress(p);
-  const kindBadge = gp ? (gp.kind === "accel" ? '<span class="badge" style="background:#cfe8cf;color:#1b5e20">ACCELERATORE</span>' : gp.kind === "freno" ? '<span class="badge" style="background:#f4d6d6;color:#9a3b34">RICHIEDE SACRIFICIO</span>' : '') : '';
-  modal(`
-    <h3>ℹ️ Obiettivo & regole rapide</h3>
-    ${gp?`<div class="card-box" style="margin:0 0 10px; ${gp.done?'border:2px solid var(--green);':''}">
-      <b class="tag-goal badge">OBIETTIVO</b> ${kindBadge} ${gp.done?'<span class="badge" style="background:var(--green);color:#fff">COMPLETATO ✓</span>':''}
+  const renderGoalBox = (gp) => {
+    if (!gp) return '';
+    const kb = gp.kind === "accel" ? '<span class="badge" style="background:#cfe8cf;color:#1b5e20">ACCELERATORE</span>' : gp.kind === "freno" ? '<span class="badge" style="background:#f4d6d6;color:#9a3b34">RICHIEDE SACRIFICIO</span>' : '';
+    return `<div class="card-box" style="margin:0 0 10px; ${gp.done?'border:2px solid var(--green);':''}">
+      <b class="tag-goal badge">OBIETTIVO</b> ${kb} ${gp.done?'<span class="badge" style="background:var(--green);color:#fff">COMPLETATO ✓</span>':''}
       <div style="font-weight:700; margin-top:6px;">${gp.title}</div>
       <div class="info-line" style="margin-top:4px;">${gp.body}</div>
       <div class="goal-progress">📊 Progresso: <b>${gp.hint}</b></div>
       <div class="info-line" style="margin-top:4px;">🎁 Ricompensa: <b>${gp.reward}</b></div>
-    </div>`:''}
+    </div>`;
+  };
+  const gp = goalProgress(p, "goal", "goalDone");
+  const gp2 = goalProgress(p, "goal2", "goal2Done");
+  modal(`
+    <h3>ℹ️ Obiettivo & regole rapide</h3>
+    ${renderGoalBox(gp)}
+    ${gp2 ? `<div class="info-line" style="margin:-4px 0 6px; font-weight:700;">🎯 Secondo obiettivo (doppio traguardo):</div>${renderGoalBox(gp2)}` : ''}
     <div class="info-line">
       <b>Vittoria:</b> ${G.mode==="short"?"primo al Livello 3.":"primo al Crossover Point (reddito passivo 4% ≥ spese)."} Alcuni obiettivi (es. Pensione Anticipata) danno una <b>vittoria alternativa</b>.<br><br>
+      <b>Casella Obiettivo:</b> tiri il dado del destino — può far avanzare o (se incompleto) regredire il tuo obiettivo; con un 6 puoi ricevere un secondo traguardo.<br>
       <b>Reddito:</b> incassato a ogni passaggio da VIA!, in base al Livello + Upskilling + personaggio.<br>
       <b>Caselle Asset:</b> investi contante per farlo crescere.<br>
       <b>Bisogni Essenziali / Tasse:</b> pagate automaticamente.<br>
@@ -3820,6 +4150,7 @@ const MANUAL_BLOCKS = [{
     ["Tipo di casella", "Cosa fai"],
     ["Asset (T-Bills, T-Bonds, Large/Small Stocks, REITs, Business/Private Equity, Trust)", "Puoi comprare quote; il valore cresce o cala secondo rendimento/rischio storico della classe."],
     ["Pesca carta", "Pesca dal mazzo indicato e applica subito l'effetto."],
+    ["Obiettivo di Vita", "Se non hai un obiettivo lo ricevi. Se ne hai già uno, tiri il dado del destino: 1-2 fanno regredire il tuo obiettivo (solo se non ancora completato), 3-5 lo fanno avanzare, e con un 6 avanzi molto e puoi ricevere anche un secondo obiettivo da perseguire in parallelo."],
     ["Tassa: Bisogni Essenziali", "Paga le spese fisse del tuo Livello attuale (obbligatoria)."],
     ["Tassa: Rich Life", "Spesa facoltativa per lusso/hobby: se la salti troppe volte, perdi Energia Vitale per burnout."],
     ["Tassa Patrimoniale", "Solo ai Livelli 5-6: paga il 2% del patrimonio netto (La Pioniera ne paga il doppio)."],
@@ -3886,7 +4217,7 @@ const MANUAL_BLOCKS = [{
   "x": "Istruzione Figli — Accantona 50.000 € entro il turno 60 → 2 Punti Saggezza permanenti."
 }, {
   "t": "p",
-  "x": "Casa al Mare — Raggiungi 250.000 € di capitale libero → 1 casella Rich Life gratuita a ogni giro."
+  "x": "Casa al Mare — Raggiungi 550.000 € di capitale libero → 1 casella Rich Life gratuita a ogni giro."
 }, {
   "t": "p",
   "x": "Pensione Anticipata — Raggiungi il tuo «Numero di Libertà» (25× le spese annue) entro il turno 120 → vittoria anticipata."
@@ -3901,7 +4232,7 @@ const MANUAL_BLOCKS = [{
   "x": "Eredità Filantropica — Livello 5 + 50.000 € in un Trust separato → 3 Punti Saggezza permanenti a fine partita."
 }, {
   "t": "p",
-  "x": "Impero Immobiliare (nuovo) — Possiedi almeno 3 quote di REITs entro il turno 90 → +2% di reddito passivo a ogni giro fino a fine partita."
+  "x": "Impero Immobiliare (nuovo) — Possiedi almeno 6 quote di REITs entro il turno 100 → +2% di reddito passivo a ogni giro fino a fine partita."
 }, {
   "t": "p",
   "x": "Fondo per la Comunità (nuovo) — Dona ≥ 20.000 € in spese Rich Life «altruistiche» → 2 Punti Saggezza permanenti e nessuna penale di burnout."
@@ -3963,7 +4294,7 @@ const MANUAL_BLOCKS = [{
   "x": "12. La Meccanica «Bank of Dad»"
 }, {
   "t": "p",
-  "x": "Con un segnalino Figlio puoi versare parte del reddito in un «Barattolo Bimbo», pagando ai figli un interesse mensile del 5%. Riduce la liquidità immediata ma genera un Bonus Eredità a fine partita e, se ben gestito, Punti Saggezza Futura. Il companion calcola il montante turno per turno."
+  "x": "Il fondo figli (Bank of Dad) è il rifugio sicuro del gioco. Versi contante e cresce dal 6% fino al 10% a giro, premiando la costanza: più a lungo lo tieni intatto, più rende (interesse composto). La sua qualità unica è che NON viene mai intaccato dai crolli di mercato né dalle carte negative — mentre le tue azioni possono precipitare, il fondo figli resta. A differenza del Trust, puoi ritirarlo in qualsiasi momento se ti serve liquidità (ma ritirando azzeri il bonus di costanza). A fine partita paga un Bonus Eredità dal 10% al 20% del fondo, più Punti Saggezza. Rende meno degli asset più aggressivi: è la scelta giusta per chi vuole ridurre il rischio o difendere un vantaggio, non per chi punta alla crescita massima."
 }, {
   "t": "h1",
   "x": "13. Condizione di Vittoria: il Crossover Point"
@@ -4050,7 +4381,13 @@ const MANUAL_BLOCKS = [{
   "x": "Insolvenza (regola di sicurezza)"
 }, {
   "t": "p",
-  "x": "Se non puoi pagare una Tassa obbligatoria, liquidi asset al valore corrente fino a coprire la cifra. Se anche svuotando il portafoglio il debito resta scoperto, entri in Insolvenza: il patrimonio netto scende a 0, salti le prossime 2 fasi di Investimento e il Livello si aggiorna. Non si esce mai per bancarotta: riparti dal reddito base del tuo profilo Varna. Così la partita ha sempre una mossa legale successiva."
+  "x": "Se non puoi pagare una Tassa obbligatoria, liquidi asset al valore corrente fino a coprire la cifra. Se anche svuotando il portafoglio il debito resta scoperto, entri in Insolvenza: il patrimonio netto scende a 0, salti le prossime 2 fasi di Investimento e il Livello si aggiorna. Se al momento dell'Insolvenza NON hai prestiti attivi, riparti semplicemente dal reddito base del tuo profilo Varna: nessuno esce dal gioco per una crisi passeggera."
+}, {
+  "t": "h2",
+  "x": "Rovina (seconda insolvenza con debiti)"
+}, {
+  "t": "p",
+  "x": "L'Insolvenza è indolore solo se non sei indebitato. Se invece vai in Insolvenza mentre hai un prestito attivo, è un primo campanello: patrimonio azzerato e 2 fasi di Investimento saltate, ma resti in gioco con un avviso. Se ti capita una SECONDA volta con debiti ancora attivi, è Rovina reale: esci dalla partita. È la conseguenza logica dell'usare troppa leva senza rimborsarla. Per questo conviene saldare il Prestito Veneziano appena hai liquidità: sulla casella Leva Finanziaria (o dal pannello Banca) puoi rimborsarlo in tutto o in parte, riducendo gli interessi che maturano ogni giro. Anche i giocatori automatici (bot) gestiscono i debiti allo stesso modo, così la regola vale per tutti."
 }, {
   "t": "h2",
   "x": "Effetti Prolungati (carte da tenere scoperte)"
@@ -4119,7 +4456,7 @@ const MANUAL_BLOCKS = [{
   "x": "Partita piena (Crossover Point): mediana intorno a 110-120 turni. Entro il tetto di 120 turni una parte delle partite si chiude con la vittoria piena; le altre si risolvono con la regola del patrimonio più alto, così la sessione finisce sempre in tempi ragionevoli."
 }, {
   "t": "p",
-  "x": "Nessun profilo Varna resta bloccato: la regola di Insolvenza (Cap. 16) garantisce sempre una mossa legale successiva e il rientro dal reddito base."
+  "x": "Nessun profilo Varna resta bloccato senza mosse: la regola di Insolvenza (Cap. 16) garantisce sempre una mossa legale successiva e il rientro dal reddito base. L'unica vera uscita è la Rovina, riservata a chi accumula debiti e va in insolvenza due volte senza rimborsarli: una scelta di rischio, non un vicolo cieco imposto dal gioco."
 }, {
   "t": "p",
   "x": "Nota di trasparenza: i numeri sono una base equilibrata e verificata, non un vincolo rigido. Un gruppo che voglia partite più lunghe può alzare le soglie della Scala; per partite lampo può abbassarle o giocare direttamente la variante breve."
